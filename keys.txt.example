@@ -1,0 +1,11 @@
+# Example API keys file for server mode
+# Usage: export API_KEY_FILE=/path/to/this/file
+# Then: ./esim-proxy -mode=server
+#
+# Security: chmod 600 this file to restrict access
+# Format: One key per line, no quotes
+
+sk_prod_esim_v1_aB1cDeF2gHiJ3kLmNoPqRsT4
+sk_prod_esim_v1_xY9zAbCdEfGhIjKlMnOpQrSt
+sk_staging_esim_v1_1234567890abcdefghijklmn
+sk_dev_local_test_key_temporary_only
