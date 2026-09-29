@@ -3,12 +3,22 @@ import { workflow, node, trigger, sticky, newCredential, ifElse, expr } from '@n
 const leadsTable = { __rl: true, mode: 'id', value: '1PpAYbgev6sKzZsc', cachedResultName: 'Leads Pipeline' };
 const stripeCred = { stripeApi: { id: 'hO57ixwoW0LItmz5', name: 'Stripe account' } };
 const twilioCred = { twilioApi: newCredential('Twilio account') };
-const sendgridCred = newCredential('SendGrid API Key');
 
-/**
- * Production Lead-to-Invoice Workflow
- * Full legal agreements with terms, privacy policy, fine print, email delivery
- */
+const agreementHtml = '<h3>Please review before signing</h3>'
+  + '<p>This agreement was prepared by our AI contract assistant from our standard terms. Tap each section to expand it.</p>'
+  + '<details><summary><strong>1. Service Terms</strong></summary>'
+  + '<p>We will deliver the service package described on your invoice within the timeline agreed on your call. You agree to provide the documents and access we reasonably need. Either party may end the engagement with 30 days written notice; work completed up to that date remains payable.</p>'
+  + '<p>Payment is due by the date shown on the Stripe invoice. Fees are non-refundable once work has started, except where required by law.</p>'
+  + '</details>'
+  + '<details><summary><strong>2. Privacy Policy</strong></summary>'
+  + '<p>We collect your name, email, phone number, company and the details you provide, only to deliver this service, send your invoice and contact you about it. Payments are processed by Stripe; text messages by Twilio. We do not sell your data. You may request access, correction or deletion at any time by emailing us. California and EU residents have the additional rights described in our full privacy policy.</p>'
+  + '</details>'
+  + '<details><summary><strong>3. Fine Print</strong></summary>'
+  + '<p>Our work is compliance support, not legal advice, and results are not guaranteed. Our total liability is limited to the fees you paid for this service. We are not liable for indirect or consequential damages. Disputes are resolved by binding individual arbitration in our home state; class actions are waived. You are responsible for your own filings and compliance decisions.</p>'
+  + '</details>'
+  + '<details><summary><strong>4. Electronic Signature</strong></summary>'
+  + '<p>Typing your full name below and checking the box is your electronic signature under the U.S. E-SIGN Act and UETA and has the same effect as a handwritten signature. We record the time of signing with your answers.</p>'
+  + '</details>';
 
 const intakeForm = trigger({
   type: 'n8n-nodes-base.formTrigger',
@@ -16,65 +26,62 @@ const intakeForm = trigger({
   config: {
     name: 'Lead Intake Form',
     parameters: {
-      formTitle: 'Request a Consultation',
-      formDescription: 'Tell us a bit about what you need. We will call you right away and text you a verification code to confirm your number.',
+      formTitle: 'Request a Compliance Consultation',
+      formDescription: '🤖 Our AI intake assistant will text you a one-time code to verify your number, ask three quick questions, and prepare your agreement.',
       formFields: {
         values: [
           { fieldName: 'full_name', fieldLabel: 'Full name', fieldType: 'text', requiredField: true },
           { fieldName: 'email', fieldLabel: 'Email', fieldType: 'email', requiredField: true },
-          { fieldName: 'phone', fieldLabel: 'Mobile phone', fieldType: 'text', placeholder: '+1 555 123 4567', requiredField: true },
-          { fieldName: 'company', fieldLabel: 'Company (optional)', fieldType: 'text' },
+          { fieldName: 'phone', fieldLabel: 'Mobile phone', fieldType: 'text', placeholder: '(336) 555-0123', requiredField: true },
+          { fieldName: 'company', fieldLabel: 'Company', fieldType: 'text' },
           { fieldName: 'request_details', fieldLabel: 'What do you need help with?', fieldType: 'textarea', requiredField: true },
           {
             fieldName: 'consent',
-            fieldLabel: 'Consent to contact',
+            fieldLabel: 'Consent',
             fieldType: 'checkbox',
             requiredField: true,
-            fieldOptions: { values: [{ option: 'I agree to receive a phone call and text messages at the number above about this request, including a one-time verification code. Msg & data rates may apply. Reply STOP to opt out.' }] }
+            fieldOptions: { values: [{ option: 'I agree to receive text messages at this number about my request, including a one-time verification code. Msg & data rates may apply. Reply STOP to opt out.' }] }
           }
         ]
       },
       responseMode: 'lastNode',
-      options: { appendAttribution: false, buttonLabel: 'Submit and verify', path: 'lead-intake', ignoreBots: true }
+      options: { appendAttribution: false, buttonLabel: 'Text me a code', path: 'lead-intake', ignoreBots: true }
     }
   },
-  output: [{ full_name: 'Jane Doe', email: 'jane@example.com', phone: '(555) 123-4567', company: 'Acme', request_details: 'Need help with X', consent: ['I agree to receive a phone call...'], submittedAt: '2026-09-29T12:00:00.000Z', formMode: 'production' }]
+  output: [{ full_name: 'Jane Doe', email: 'jane@example.com', phone: '(336) 555-0123', company: 'Acme', request_details: 'OSHA posting help', consent: ['I agree to receive text messages...'], submittedAt: '2026-09-29T12:00:00.000Z', formMode: 'production' }]
 });
 
-const serviceConfig = node({
+const prepareLead = node({
   type: 'n8n-nodes-base.set',
   version: 3.4,
   config: {
-    name: 'Service Config',
+    name: 'Prepare Lead',
     parameters: {
       mode: 'manual',
       includeOtherFields: true,
       assignments: {
         assignments: [
-          { id: 'cfg-ref', name: 'lead_ref', value: expr('LEAD-{{ $execution.id }}'), type: 'string' },
-          { id: 'cfg-phone', name: 'phone_e164', value: expr("{{ (() => { const d = String($json.phone || '').replace(/[^\\d+]/g, ''); if (d.startsWith('+')) return d; if (d.length === 10) return '+1' + d; if (d.length === 11 && d.startsWith('1')) return '+' + d; return '+' + d; })() }}"), type: 'string' },
-          { id: 'cfg-biz', name: 'business_name', value: 'EDIT ME - Your Business Name', type: 'string' },
-          { id: 'cfg-email', name: 'business_email', value: 'support@example.com', type: 'string' },
-          { id: 'cfg-from', name: 'twilio_from_number', value: 'EDIT ME - +15550000000', type: 'string' },
-          { id: 'cfg-verify', name: 'twilio_verify_sid', value: 'EDIT ME - VAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', type: 'string' },
-          { id: 'cfg-svc', name: 'service_name', value: 'EDIT ME - Service Package', type: 'string' },
-          { id: 'cfg-price', name: 'price_usd', value: 500, type: 'number' },
-          { id: 'cfg-due', name: 'days_until_due', value: 7, type: 'number' },
-          { id: 'cfg-ver', name: 'agreement_version', value: 'v1-2026-09', type: 'string' },
-          { id: 'cfg-consent-text', name: 'consent_text', value: expr("{{ ($json.consent || []).join(' ') }}"), type: 'string' }
+          { id: 'ref', name: 'lead_ref', value: expr('LEAD-{{ $execution.id }}'), type: 'string' },
+          { id: 'e164', name: 'phone_e164', value: expr("{{ (() => { const d = String($json.phone || '').replace(/[^\\d]/g, ''); if (String($json.phone || '').trim().startsWith('+')) return '+' + d; if (d.length === 10) return '+1' + d; if (d.length === 11 && d.startsWith('1')) return '+' + d; return '+' + d; })() }}"), type: 'string' },
+          { id: 'consent', name: 'consent_text', value: expr("{{ ($json.consent || []).join(' ') }}"), type: 'string' },
+          { id: 'verify', name: 'twilio_verify_sid', value: 'VA_REPLACE_WITH_YOUR_VERIFY_SERVICE_SID', type: 'string' },
+          { id: 'svc', name: 'service_name', value: 'Compliance Navigator', type: 'string' },
+          { id: 'price', name: 'price_usd', value: 2500, type: 'number' },
+          { id: 'due', name: 'days_until_due', value: 14, type: 'number' },
+          { id: 'ver', name: 'agreement_version', value: 'v1-2026-09', type: 'string' }
         ]
       },
       options: {}
     }
   },
-  output: [{ full_name: 'Jane Doe', email: 'jane@example.com', phone: '(555) 123-4567', company: 'Acme', request_details: 'Need help with X', lead_ref: 'LEAD-123', phone_e164: '+15551234567', business_name: 'Your Business', business_email: 'support@example.com', twilio_from_number: '+15550000000', twilio_verify_sid: 'VAxxx', service_name: 'Service Package', price_usd: 500, days_until_due: 7, agreement_version: 'v1-2026-09', consent_text: 'I agree...' }]
+  output: [{ full_name: 'Jane Doe', email: 'jane@example.com', phone: '(336) 555-0123', company: 'Acme', request_details: 'OSHA posting help', submittedAt: '2026-09-29T12:00:00.000Z', lead_ref: 'LEAD-123', phone_e164: '+13365550123', consent_text: 'I agree...', twilio_verify_sid: 'VA123', service_name: 'Compliance Navigator', price_usd: 2500, days_until_due: 14, agreement_version: 'v1-2026-09' }]
 });
 
 const saveLead = node({
   type: 'n8n-nodes-base.dataTable',
   version: 1.1,
   config: {
-    name: 'Save Raw Lead',
+    name: 'Save New Lead',
     parameters: {
       resource: 'row',
       operation: 'insert',
@@ -104,336 +111,293 @@ const saveLead = node({
           { id: 'company', displayName: 'company', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
           { id: 'request_details', displayName: 'request_details', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
           { id: 'consent_text', displayName: 'consent_text', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
-          { id: 'consent_at', displayName: 'consent_at', required: false, defaultMatch: false, display: true, type: 'string' },
-          { id: 'status', displayName: 'status', required: false, defaultMatch: false, display: true, type: 'string' },
-          { id: 'service_name', displayName: 'service_name', required: false, defaultMatch: false, display: true, type: 'string' },
-          { id: 'price_usd', displayName: 'price_usd', required: false, defaultMatch: false, display: true, type: 'number' },
-          { id: 'agreement_version', displayName: 'agreement_version', required: false, defaultMatch: false, display: true, type: 'string' },
-          { id: 'followup_count', displayName: 'followup_count', required: false, defaultMatch: false, display: true, type: 'number' }
+          { id: 'consent_at', displayName: 'consent_at', required: false, defaultMatch: false, display: true, type: 'dateTime', canBeUsedToMatch: true },
+          { id: 'status', displayName: 'status', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'service_name', displayName: 'service_name', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'price_usd', displayName: 'price_usd', required: false, defaultMatch: false, display: true, type: 'number', canBeUsedToMatch: true },
+          { id: 'agreement_version', displayName: 'agreement_version', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'followup_count', displayName: 'followup_count', required: false, defaultMatch: false, display: true, type: 'number', canBeUsedToMatch: true }
         ]
-      }
-    }
-  },
-  output: [{ lead_ref: 'LEAD-123', status: 'saved' }]
-});
-
-const sendOtp = node({
-  type: 'n8n-nodes-base.httpRequest',
-  version: 4.2,
-  config: {
-    name: 'Send OTP via Twilio Verify',
-    parameters: {
-      method: 'POST',
-      url: expr('{{ "https://verify.twilio.com/v2/Services/" + $json.twilio_verify_sid + "/Verifications" }}'),
-      authentication: 'generic',
-      genericAuthType: 'httpBasicAuth',
-      basicAuthCredentials: newCredential('Twilio account'),
-      body: expr('{{ JSON.stringify({ to: $json.phone_e164, channel: "sms" }) }}'),
-      options: { neverError: true }
-    }
-  },
-  output: [{ sid: 'VE...', status: 'pending' }]
-});
-
-const callLead = node({
-  type: 'n8n-nodes-base.twilio',
-  version: 2.0,
-  config: {
-    name: 'Call Lead - Verify Code Reminder',
-    parameters: {
-      resource: 'call',
-      operation: 'create',
-      fromNumber: expr('{{ $json.twilio_from_number }}'),
-      toNumber: expr('{{ $json.phone_e164 }}'),
-      twiml: expr("{{ '<Response><Say voice=\"woman\">Hello ' + $json.full_name + '. We just sent a 6 digit verification code to your phone via text message. Please enter this code in the form when prompted. Thank you.</Say></Response>' }}"),
+      },
       options: {}
     }
   },
-  output: [{ sid: 'CA...', status: 'queued' }]
+  output: [{ id: 1, createdAt: '2026-09-29T12:00:01.000Z', updatedAt: '2026-09-29T12:00:01.000Z' }]
 });
 
-const otpPage = trigger({
-  type: 'n8n-nodes-base.formTrigger',
-  version: 2.6,
-  config: {
-    name: 'OTP Verification Form',
-    parameters: {
-      formTitle: 'Verify Your Phone Number',
-      formDescription: expr("{{ 'We just called ' + $('intakeForm').item.json.phone + ' and sent a verification code via text. Enter the 6-digit code below.' }}"),
-      formFields: {
-        values: [
-          { fieldName: 'otp_code', fieldLabel: 'Verification code', fieldType: 'text', placeholder: '000000', requiredField: true, fieldOptions: { maxLength: 6 } }
-        ]
-      },
-      responseMode: 'lastNode',
-      options: { resumeForEachOutput: true, resumeTimeout: 900, appendAttribution: false, buttonLabel: 'Verify' }
-    }
-  },
-  output: [{ otp_code: '123456', submittedAt: '2026-09-29T12:05:00.000Z' }]
-});
-
-const checkOtp = node({
+const sendCode = node({
   type: 'n8n-nodes-base.httpRequest',
   version: 4.2,
   config: {
-    name: 'Check OTP Code',
+    name: 'Text Verification Code',
     parameters: {
       method: 'POST',
-      url: expr('{{ "https://verify.twilio.com/v2/Services/" + $("ServiceConfig").item.json.twilio_verify_sid + "/VerificationCheck" }}'),
-      authentication: 'generic',
-      genericAuthType: 'httpBasicAuth',
-      basicAuthCredentials: newCredential('Twilio account'),
-      body: expr('{{ JSON.stringify({ to: $("ServiceConfig").item.json.phone_e164, code: $json.otp_code }) }}'),
-      options: { neverError: true }
-    }
-  },
-  output: [{ status: 'approved', valid: true }]
-});
-
-const isVerified = ifElse({
-  condition: expr('{{ $json.status === "approved" }}'),
-  trueNode: node({
-    type: 'n8n-nodes-base.set',
-    version: 3.4,
-    config: {
-      name: 'Mark Verified',
-      parameters: {
-        mode: 'passthroughs',
-        options: {}
-      }
-    },
-    output: [{ verified: true }]
-  }),
-  falseNode: node({
-    type: 'n8n-nodes-base.set',
-    version: 3.4,
-    config: {
-      name: 'Mark Unverified - Nurture',
-      parameters: {
-        mode: 'manual',
-        assignments: {
-          assignments: [
-            { id: 'unverified-status', name: 'otp_status', value: 'failed', type: 'string' },
-            { id: 'unverified-msg', name: 'message', value: 'Verification code incorrect. Your lead has been added to our nurture sequence.', type: 'string' }
-          ]
-        }
-      }
-    },
-    output: [{
-      otp_status: 'failed',
-      message: 'Verification failed'
-    }]
-  })
-});
-
-const prescreenPage = trigger({
-  type: 'n8n-nodes-base.formTrigger',
-  version: 2.6,
-  config: {
-    name: 'Prescreening Questions',
-    parameters: {
-      formTitle: 'Quick Qualification Questions',
-      formDescription: 'Just a few quick questions to make sure we can help you.',
-      formFields: {
-        values: [
-          {
-            fieldName: 'pq_timeline',
-            fieldLabel: 'When do you need this done?',
-            fieldType: 'dropdown',
-            requiredField: true,
-            fieldOptions: { values: [{ option: 'Within 30 days' }, { option: 'Within 30-60 days' }, { option: 'Within 60+ days' }] }
-          },
-          {
-            fieldName: 'pq_budget',
-            fieldLabel: 'Is your budget $500-$10,000 for this service?',
-            fieldType: 'dropdown',
-            requiredField: true,
-            fieldOptions: { values: [{ option: 'Yes' }, { option: 'No' }] }
-          },
-          {
-            fieldName: 'pq_decision_maker',
-            fieldLabel: 'Are you the decision-maker for this decision?',
-            fieldType: 'dropdown',
-            requiredField: true,
-            fieldOptions: { values: [{ option: 'Yes' }, { option: 'No, I need to check with someone' }] }
-          },
-          {
-            fieldName: 'pq_notes',
-            fieldLabel: 'Anything else we should know? (optional)',
-            fieldType: 'textarea'
-          }
+      url: expr('https://verify.twilio.com/v2/Services/{{ $("Prepare Lead").item.json.twilio_verify_sid }}/Verifications'),
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'twilioApi',
+      sendBody: true,
+      contentType: 'form-urlencoded',
+      bodyParameters: {
+        parameters: [
+          { name: 'To', value: expr('{{ $("Prepare Lead").item.json.phone_e164 }}') },
+          { name: 'Channel', value: 'sms' }
         ]
       },
-      responseMode: 'lastNode',
-      options: { resumeForEachOutput: true, resumeTimeout: 7200, appendAttribution: false, buttonLabel: 'Continue' }
+      options: {}
+    },
+    credentials: twilioCred
+  },
+  output: [{ sid: 'VE123', status: 'pending', to: '+13365550123', channel: 'sms' }]
+});
+
+const enterCode = node({
+  type: 'n8n-nodes-base.form',
+  version: 2.5,
+  config: {
+    name: 'Enter Code Page',
+    parameters: {
+      operation: 'page',
+      formFields: {
+        values: [
+          { fieldName: 'otp_code', fieldLabel: '6-digit code', fieldType: 'text', placeholder: '123456', requiredField: true }
+        ]
+      },
+      limitWaitTime: true,
+      limitType: 'afterTimeInterval',
+      resumeAmount: 15,
+      resumeUnit: 'minutes',
+      options: {
+        formTitle: 'Check your texts',
+        formDescription: expr('🤖 Our AI assistant just texted a 6-digit code to {{ $("Prepare Lead").item.json.phone_e164 }}. Enter it below within 15 minutes.'),
+        buttonLabel: 'Verify'
+      }
     }
   },
-  output: [{
-    pq_timeline: 'Within 30 days',
-    pq_budget: 'Yes',
-    pq_decision_maker: 'Yes',
-    pq_notes: 'Need it ASAP',
-    submittedAt: '2026-09-29T12:10:00.000Z'
-  }]
+  output: [{ otp_code: '123456' }]
+});
+
+const checkCode = node({
+  type: 'n8n-nodes-base.httpRequest',
+  version: 4.2,
+  config: {
+    name: 'Check Verification Code',
+    onError: 'continueRegularOutput',
+    parameters: {
+      method: 'POST',
+      url: expr('https://verify.twilio.com/v2/Services/{{ $("Prepare Lead").item.json.twilio_verify_sid }}/VerificationCheck'),
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'twilioApi',
+      sendBody: true,
+      contentType: 'form-urlencoded',
+      bodyParameters: {
+        parameters: [
+          { name: 'To', value: expr('{{ $("Prepare Lead").item.json.phone_e164 }}') },
+          { name: 'Code', value: expr('{{ String($json.otp_code || "").trim() }}') }
+        ]
+      },
+      options: {}
+    },
+    credentials: twilioCred
+  },
+  output: [{ sid: 'VE123', status: 'approved', valid: true }]
+});
+
+const codeApproved = ifElse({
+  version: 2.2,
+  config: {
+    name: 'Code Approved?',
+    parameters: {
+      conditions: {
+        options: { caseSensitive: true, leftValue: '', typeValidation: 'loose' },
+        conditions: [{ leftValue: expr('{{ $json.status }}'), operator: { type: 'string', operation: 'equals' }, rightValue: 'approved' }],
+        combinator: 'and'
+      }
+    }
+  }
+});
+
+const markVerified = node({
+  type: 'n8n-nodes-base.dataTable',
+  version: 1.1,
+  config: {
+    name: 'Mark Phone Verified',
+    parameters: {
+      resource: 'row',
+      operation: 'update',
+      dataTableId: leadsTable,
+      matchType: 'allConditions',
+      filters: { conditions: [{ keyName: 'lead_ref', condition: 'eq', keyValue: expr('{{ $("Prepare Lead").item.json.lead_ref }}') }] },
+      columns: {
+        mappingMode: 'defineBelow',
+        value: { status: 'verified', otp_status: 'approved', otp_verified_at: expr('{{ $now.toISO() }}') },
+        schema: [
+          { id: 'status', displayName: 'status', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'otp_status', displayName: 'otp_status', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'otp_verified_at', displayName: 'otp_verified_at', required: false, defaultMatch: false, display: true, type: 'dateTime', canBeUsedToMatch: true }
+        ]
+      },
+      options: {}
+    }
+  },
+  output: [{ id: 1 }]
+});
+
+const prescreenPage = node({
+  type: 'n8n-nodes-base.form',
+  version: 2.5,
+  config: {
+    name: 'Prescreen Questions Page',
+    parameters: {
+      operation: 'page',
+      formFields: {
+        values: [
+          { fieldName: 'pq_timeline', fieldLabel: 'When do you need this done?', fieldType: 'dropdown', requiredField: true, fieldOptions: { values: [{ option: 'Within 30 days' }, { option: '30-60 days' }, { option: '60+ days' }] } },
+          { fieldName: 'pq_budget', fieldLabel: 'Is a budget of $2,500-$7,500 workable for this service?', fieldType: 'dropdown', requiredField: true, fieldOptions: { values: [{ option: 'Yes' }, { option: 'No' }] } },
+          { fieldName: 'pq_decision_maker', fieldLabel: 'Are you the decision-maker?', fieldType: 'dropdown', requiredField: true, fieldOptions: { values: [{ option: 'Yes' }, { option: 'No, I need to check with someone' }] } },
+          { fieldName: 'pq_notes', fieldLabel: 'Anything else we should know?', fieldType: 'textarea' }
+        ]
+      },
+      limitWaitTime: true,
+      limitType: 'afterTimeInterval',
+      resumeAmount: 2,
+      resumeUnit: 'hours',
+      options: {
+        formTitle: 'Phone verified ✓',
+        formDescription: '🤖 Three quick questions so our AI assistant can match you with the right service.',
+        buttonLabel: 'Continue'
+      }
+    }
+  },
+  output: [{ pq_timeline: 'Within 30 days', pq_budget: 'Yes', pq_decision_maker: 'Yes', pq_notes: '' }]
 });
 
 const scorePrescreen = node({
   type: 'n8n-nodes-base.set',
   version: 3.4,
   config: {
-    name: 'Score Prescreening',
+    name: 'AI Qualification Score',
     parameters: {
       mode: 'manual',
+      includeOtherFields: true,
       assignments: {
         assignments: [
-          {
-            id: 'score-calc',
-            name: 'prescreen_score',
-            value: expr(`{{ (() => {
-              let score = 0;
-              if ($json.pq_timeline === 'Within 30 days') score += 1;
-              if ($json.pq_budget === 'Yes') score += 1;
-              if ($json.pq_decision_maker === 'Yes') score += 1;
-              return score;
-            })() }}`),
-            type: 'number'
-          },
-          {
-            id: 'qualify',
-            name: 'qualified',
-            value: expr('{{ $json.prescreen_score >= 2 && $json.pq_budget === "Yes" }}'),
-            type: 'boolean'
-          }
+          { id: 'score', name: 'prescreen_score', value: expr("{{ ($json.pq_timeline === 'Within 30 days' ? 1 : 0) + ($json.pq_budget === 'Yes' ? 1 : 0) + ($json.pq_decision_maker === 'Yes' ? 1 : 0) }}"), type: 'number' },
+          { id: 'qual', name: 'qualified', value: expr("{{ $json.pq_budget === 'Yes' && (($json.pq_timeline === 'Within 30 days' ? 1 : 0) + ($json.pq_decision_maker === 'Yes' ? 1 : 0)) >= 1 }}"), type: 'boolean' }
         ]
-      }
-    }
-  },
-  output: [{
-    prescreen_score: 3,
-    qualified: true
-  }]
-});
-
-const qualifyCheck = ifElse({
-  condition: expr('{{ $json.qualified === true }}'),
-  trueNode: node({
-    type: 'n8n-nodes-base.set',
-    version: 3.4,
-    config: {
-      name: 'Qualified - Show Agreement',
-      parameters: {
-        mode: 'passthroughs',
-        options: {}
-      }
-    },
-    output: [{ qualified: true }]
-  }),
-  falseNode: node({
-    type: 'n8n-nodes-base.set',
-    version: 3.4,
-    config: {
-      name: 'Not Qualified - Nurture',
-      parameters: {
-        mode: 'manual',
-        assignments: {
-          assignments: [
-            { id: 'nurture-msg', name: 'message', value: 'Thank you for your interest. We\'ll follow up with you in a few weeks with resources that may help.', type: 'string' }
-          ]
-        }
-      }
-    },
-    output: [{
-      message: 'Not qualified'
-    }]
-  })
-});
-
-const agreementPage = trigger({
-  type: 'n8n-nodes-base.formTrigger',
-  version: 2.6,
-  config: {
-    name: 'Service Agreement & Signature',
-    parameters: {
-      formTitle: 'Service Agreement',
-      formDescription: 'Please review and accept our service agreement below. Your signature confirms acceptance.',
-      formFields: {
-        values: [
-          {
-            fieldName: 'agreement_terms',
-            fieldLabel: 'Service Terms',
-            fieldType: 'dropdown',
-            requiredField: true,
-            fieldOptions: {
-              values: [
-                {
-                  option: 'I have read and accept the Terms of Service, Privacy Policy, and Fine Print'
-                }
-              ]
-            }
-          },
-          {
-            fieldName: 'signature_name',
-            fieldLabel: 'Type your name to sign',
-            fieldType: 'text',
-            requiredField: true,
-            placeholder: 'Jane Doe'
-          },
-          {
-            fieldName: 'agreement_accepted',
-            fieldLabel: 'Final Acceptance',
-            fieldType: 'checkbox',
-            requiredField: true,
-            fieldOptions: {
-              values: [
-                {
-                  option: 'I agree to the service agreement and authorize payment'
-                }
-              ]
-            }
-          }
-        ]
-      },
-      responseMode: 'lastNode',
-      options: {
-        resumeForEachOutput: true,
-        resumeTimeout: 86400,
-        appendAttribution: false,
-        buttonLabel: 'Accept & Sign',
-        path: 'service-agreement'
-      }
-    }
-  },
-  output: [{
-    agreement_terms: ['I have read and accept...'],
-    signature_name: 'Jane Doe',
-    agreement_accepted: ['I agree to the service agreement...'],
-    submittedAt: '2026-09-29T12:15:00.000Z'
-  }]
-});
-
-const createCustomer = node({
-  type: 'n8n-nodes-base.stripe',
-  version: 3.2,
-  config: {
-    name: 'Create Stripe Customer',
-    parameters: {
-      resource: 'customer',
-      operation: 'create',
-      name: expr('{{ $("intakeForm").item.json.full_name }}'),
-      email: expr('{{ $("intakeForm").item.json.email }}'),
-      metadata: {
-        lead_ref: expr('{{ $("ServiceConfig").item.json.lead_ref }}'),
-        agreement_version: expr('{{ $("ServiceConfig").item.json.agreement_version }}'),
-        signature_name: expr('{{ $json.signature_name }}')
       },
       options: {}
     }
   },
-  output: [{
-    id: 'cus_abc123',
-    name: 'Jane Doe',
-    email: 'jane@example.com'
-  }]
+  output: [{ pq_timeline: 'Within 30 days', pq_budget: 'Yes', pq_decision_maker: 'Yes', pq_notes: '', prescreen_score: 3, qualified: true }]
+});
+
+const saveScore = node({
+  type: 'n8n-nodes-base.dataTable',
+  version: 1.1,
+  config: {
+    name: 'Save Prescreen Answers',
+    parameters: {
+      resource: 'row',
+      operation: 'update',
+      dataTableId: leadsTable,
+      matchType: 'allConditions',
+      filters: { conditions: [{ keyName: 'lead_ref', condition: 'eq', keyValue: expr('{{ $("Prepare Lead").item.json.lead_ref }}') }] },
+      columns: {
+        mappingMode: 'defineBelow',
+        value: {
+          pq_timeline: expr('{{ $json.pq_timeline }}'),
+          pq_budget: expr('{{ $json.pq_budget }}'),
+          pq_decision_maker: expr('{{ $json.pq_decision_maker }}'),
+          pq_notes: expr('{{ $json.pq_notes }}'),
+          prescreen_score: expr('{{ $json.prescreen_score }}'),
+          qualified: expr('{{ $json.qualified }}'),
+          status: expr("{{ $json.qualified ? 'qualified' : 'nurture' }}")
+        },
+        schema: [
+          { id: 'pq_timeline', displayName: 'pq_timeline', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'pq_budget', displayName: 'pq_budget', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'pq_decision_maker', displayName: 'pq_decision_maker', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'pq_notes', displayName: 'pq_notes', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'prescreen_score', displayName: 'prescreen_score', required: false, defaultMatch: false, display: true, type: 'number', canBeUsedToMatch: true },
+          { id: 'qualified', displayName: 'qualified', required: false, defaultMatch: false, display: true, type: 'boolean', canBeUsedToMatch: true },
+          { id: 'status', displayName: 'status', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true }
+        ]
+      },
+      options: {}
+    }
+  },
+  output: [{ id: 1 }]
+});
+
+const isQualified = ifElse({
+  version: 2.2,
+  config: {
+    name: 'Qualified?',
+    parameters: {
+      conditions: {
+        options: { caseSensitive: true, leftValue: '', typeValidation: 'loose' },
+        conditions: [{ leftValue: expr('{{ $("AI Qualification Score").item.json.qualified }}'), operator: { type: 'boolean', operation: 'true', singleValue: true } }],
+        combinator: 'and'
+      }
+    }
+  }
+});
+
+const agreementPage = node({
+  type: 'n8n-nodes-base.form',
+  version: 2.5,
+  config: {
+    name: 'Agreement & Signature Page',
+    parameters: {
+      operation: 'page',
+      formFields: {
+        values: [
+          { fieldType: 'html', elementName: 'agreement_text', html: agreementHtml },
+          { fieldName: 'signature_name', fieldLabel: 'Type your full legal name to sign', fieldType: 'text', requiredField: true },
+          { fieldName: 'agreement_accepted', fieldLabel: 'Acceptance', fieldType: 'checkbox', requiredField: true, fieldOptions: { values: [{ option: 'I have read and agree to the Service Terms, Privacy Policy and Fine Print, and authorize the invoice.' }] } }
+        ]
+      },
+      limitWaitTime: true,
+      limitType: 'afterTimeInterval',
+      resumeAmount: 1,
+      resumeUnit: 'days',
+      options: {
+        formTitle: expr('Your {{ $("Prepare Lead").item.json.service_name }} agreement'),
+        formDescription: expr('🤖 Prepared by our AI contract assistant for {{ $("Prepare Lead").item.json.full_name }}. Price: ${{ $("Prepare Lead").item.json.price_usd }}, due {{ $("Prepare Lead").item.json.days_until_due }} days after invoicing.'),
+        buttonLabel: 'Sign & get my invoice'
+      }
+    }
+  },
+  output: [{ signature_name: 'Jane Doe', agreement_accepted: ['I have read and agree...'] }]
+});
+
+const createCustomer = node({
+  type: 'n8n-nodes-base.httpRequest',
+  version: 4.2,
+  config: {
+    name: 'Create Stripe Customer',
+    parameters: {
+      method: 'POST',
+      url: 'https://api.stripe.com/v1/customers',
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'stripeApi',
+      sendBody: true,
+      contentType: 'form-urlencoded',
+      bodyParameters: {
+        parameters: [
+          { name: 'name', value: expr('{{ $("Prepare Lead").item.json.full_name }}') },
+          { name: 'email', value: expr('{{ $("Prepare Lead").item.json.email }}') },
+          { name: 'phone', value: expr('{{ $("Prepare Lead").item.json.phone_e164 }}') },
+          { name: 'metadata[lead_ref]', value: expr('{{ $("Prepare Lead").item.json.lead_ref }}') },
+          { name: 'metadata[signature_name]', value: expr('{{ $json.signature_name }}') },
+          { name: 'metadata[agreement_version]', value: expr('{{ $("Prepare Lead").item.json.agreement_version }}') }
+        ]
+      },
+      options: {}
+    },
+    credentials: stripeCred
+  },
+  output: [{ id: 'cus_123', email: 'jane@example.com' }]
 });
 
 const createInvoice = node({
@@ -444,27 +408,24 @@ const createInvoice = node({
     parameters: {
       method: 'POST',
       url: 'https://api.stripe.com/v1/invoices',
-      authentication: 'generic',
-      genericAuthType: 'headerAuth',
-      headerAuthHeaders: {
-        'Authorization': expr('{{ "Bearer " + newCredential("Stripe API Key") }}')
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'stripeApi',
+      sendBody: true,
+      contentType: 'form-urlencoded',
+      bodyParameters: {
+        parameters: [
+          { name: 'customer', value: expr('{{ $json.id }}') },
+          { name: 'collection_method', value: 'send_invoice' },
+          { name: 'days_until_due', value: expr('{{ $("Prepare Lead").item.json.days_until_due }}') },
+          { name: 'auto_advance', value: 'false' },
+          { name: 'metadata[lead_ref]', value: expr('{{ $("Prepare Lead").item.json.lead_ref }}') }
+        ]
       },
-      body: expr(`{
-        "customer": "$('CreateStripeCustomer').output[0].id",
-        "auto_advance": false,
-        "metadata": {
-          "lead_ref": "$('ServiceConfig').item.json.lead_ref",
-          "agreement_signed": true
-        }
-      }`),
-      options: { neverError: true }
-    }
+      options: {}
+    },
+    credentials: stripeCred
   },
-  output: [{
-    id: 'in_abc123',
-    customer: 'cus_abc123',
-    status: 'draft'
-  }]
+  output: [{ id: 'in_123', customer: 'cus_123', status: 'draft' }]
 });
 
 const addLineItem = node({
@@ -475,192 +436,169 @@ const addLineItem = node({
     parameters: {
       method: 'POST',
       url: 'https://api.stripe.com/v1/invoiceitems',
-      authentication: 'generic',
-      genericAuthType: 'headerAuth',
-      headerAuthHeaders: {
-        'Authorization': expr('{{ "Bearer " + newCredential("Stripe API Key") }}')
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'stripeApi',
+      sendBody: true,
+      contentType: 'form-urlencoded',
+      bodyParameters: {
+        parameters: [
+          { name: 'customer', value: expr('{{ $json.customer }}') },
+          { name: 'invoice', value: expr('{{ $json.id }}') },
+          { name: 'amount', value: expr('{{ Math.round($("Prepare Lead").item.json.price_usd * 100) }}') },
+          { name: 'currency', value: 'usd' },
+          { name: 'description', value: expr('{{ $("Prepare Lead").item.json.service_name }}') }
+        ]
       },
-      body: expr(`{
-        "customer": "$('CreateStripeCustomer').output[0].id",
-        "invoice": "$('CreateInvoice').output[0].id",
-        "amount": ${expr('{{ Math.round($("ServiceConfig").item.json.price_usd * 100) }}')},"currency": "usd",
-        "description": "${'{{ $("ServiceConfig").item.json.service_name }}'}"
-      }`),
-      options: { neverError: true }
-    }
+      options: {}
+    },
+    credentials: stripeCred
   },
-  output: [{ id: 'ii_abc123' }]
-});
-
-const finalizeInvoice = node({
-  type: 'n8n-nodes-base.httpRequest',
-  version: 4.2,
-  config: {
-    name: 'Finalize Invoice',
-    parameters: {
-      method: 'POST',
-      url: expr('{{ "https://api.stripe.com/v1/invoices/" + $("CreateInvoice").output[0].id + "/finalize" }}'),
-      authentication: 'generic',
-      genericAuthType: 'headerAuth',
-      headerAuthHeaders: {
-        'Authorization': expr('{{ "Bearer " + newCredential("Stripe API Key") }}')
-      },
-      body: '{}',
-      options: { neverError: true }
-    }
-  },
-  output: [{ id: 'in_abc123', status: 'finalized' }]
+  output: [{ id: 'ii_123', invoice: 'in_123' }]
 });
 
 const sendInvoice = node({
   type: 'n8n-nodes-base.httpRequest',
   version: 4.2,
   config: {
-    name: 'Email Invoice to Customer',
+    name: 'Send Invoice',
     parameters: {
       method: 'POST',
-      url: expr('{{ "https://api.stripe.com/v1/invoices/" + $("CreateInvoice").output[0].id + "/send" }}'),
-      authentication: 'generic',
-      genericAuthType: 'headerAuth',
-      headerAuthHeaders: {
-        'Authorization': expr('{{ "Bearer " + newCredential("Stripe API Key") }}')
-      },
-      body: '{}',
-      options: { neverError: true }
-    }
+      url: expr('https://api.stripe.com/v1/invoices/{{ $("Create Draft Invoice").item.json.id }}/send'),
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'stripeApi',
+      options: {}
+    },
+    credentials: stripeCred
   },
-  output: [{ success: true }]
+  output: [{ id: 'in_123', number: 'ABC-0001', status: 'open', hosted_invoice_url: 'https://invoice.stripe.com/i/abc', amount_due: 250000 }]
 });
 
-const updateLeadRecord = node({
+const saveInvoice = node({
   type: 'n8n-nodes-base.dataTable',
   version: 1.1,
   config: {
-    name: 'Update Lead - Agreement Signed',
+    name: 'Save Signature & Invoice',
     parameters: {
       resource: 'row',
       operation: 'update',
       dataTableId: leadsTable,
+      matchType: 'allConditions',
+      filters: { conditions: [{ keyName: 'lead_ref', condition: 'eq', keyValue: expr('{{ $("Prepare Lead").item.json.lead_ref }}') }] },
       columns: {
         mappingMode: 'defineBelow',
         value: {
-          lead_ref: expr('{{ $("ServiceConfig").item.json.lead_ref }}'),
-          agreement_signature: expr('{{ $json.signature_name }}'),
-          agreement_accepted_at: expr('{{ $json.submittedAt }}'),
-          status: 'invoice_sent',
-          stripe_invoice_id: expr('{{ $("CreateInvoice").output[0].id }}'),
-          invoice_url: expr('{{ "https://invoice.stripe.com/i/" + $("CreateInvoice").output[0].id }}'),
-          invoice_status: 'sent'
+          agreement_signature: expr('{{ $("Agreement & Signature Page").item.json.signature_name }}'),
+          agreement_accepted_at: expr('{{ $now.toISO() }}'),
+          stripe_customer_id: expr('{{ $("Create Stripe Customer").item.json.id }}'),
+          stripe_invoice_id: expr('{{ $json.id }}'),
+          invoice_url: expr('{{ $json.hosted_invoice_url }}'),
+          invoice_status: expr('{{ $json.status }}'),
+          status: 'invoice_sent'
         },
         schema: [
-          { id: 'lead_ref', displayName: 'lead_ref', required: true, type: 'string', canBeUsedToMatch: true },
-          { id: 'agreement_signature', displayName: 'agreement_signature', required: false, type: 'string' },
-          { id: 'agreement_accepted_at', displayName: 'agreement_accepted_at', required: false, type: 'string' },
-          { id: 'status', displayName: 'status', required: false, type: 'string' },
-          { id: 'stripe_invoice_id', displayName: 'stripe_invoice_id', required: false, type: 'string' },
-          { id: 'invoice_url', displayName: 'invoice_url', required: false, type: 'string' },
-          { id: 'invoice_status', displayName: 'invoice_status', required: false, type: 'string' }
+          { id: 'agreement_signature', displayName: 'agreement_signature', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'agreement_accepted_at', displayName: 'agreement_accepted_at', required: false, defaultMatch: false, display: true, type: 'dateTime', canBeUsedToMatch: true },
+          { id: 'stripe_customer_id', displayName: 'stripe_customer_id', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'stripe_invoice_id', displayName: 'stripe_invoice_id', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'invoice_url', displayName: 'invoice_url', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'invoice_status', displayName: 'invoice_status', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'status', displayName: 'status', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true }
         ]
-      }
+      },
+      options: {}
     }
   },
-  output: [{ success: true }]
+  output: [{ id: 1 }]
 });
 
-const successPage = node({
-  type: 'n8n-nodes-base.set',
-  version: 3.4,
+const invoiceSentPage = node({
+  type: 'n8n-nodes-base.form',
+  version: 2.5,
   config: {
-    name: 'Success Page Response',
+    name: 'Invoice Sent Page',
     parameters: {
-      mode: 'manual',
-      assignments: {
-        assignments: [
-          { id: 'success-heading', name: 'heading', value: 'Welcome! Your Invoice Has Been Sent', type: 'string' },
-          { id: 'success-message', name: 'message', value: expr('{{ "Thank you, " + $("intakeForm").item.json.full_name + ". We have sent your invoice for " + $("ServiceConfig").item.json.service_name + " to " + $("intakeForm").item.json.email + '." }}'), type: 'string' },
-          { id: 'success-amount', name: 'amount', value: expr('{{ "$" + $("ServiceConfig").item.json.price_usd }}'), type: 'string' },
-          { id: 'success-due', name: 'due_date', value: expr(`{{ (() => { const d = new Date(); d.setDate(d.getDate() + $("ServiceConfig").item.json.days_until_due); return d.toLocaleDateString(); })() }}`), type: 'string' },
-          { id: 'success-invoice-url', name: 'invoice_url', value: expr('{{ $("CreateInvoice").output[0].hosted_invoice_url }}'), type: 'string' },
-          { id: 'success-signature', name: 'signed_by', value: expr('{{ $json.signature_name }}'), type: 'string' }
-        ]
-      }
+      operation: 'completion',
+      respondWith: 'text',
+      completionTitle: 'Signed. Your invoice is on its way.',
+      completionMessage: expr('Thank you, {{ $("Prepare Lead").item.json.full_name }}. Our AI billing assistant emailed invoice {{ $("Send Invoice").item.json.number }} for ${{ $("Prepare Lead").item.json.price_usd }} to {{ $("Prepare Lead").item.json.email }}. You can also pay here: {{ $("Send Invoice").item.json.hosted_invoice_url }}')
     }
   },
-  output: [{
-    heading: 'Welcome! Your Invoice Has Been Sent',
-    message: 'Thank you, Jane Doe. We have sent your invoice...',
-    amount: '$500',
-    due_date: '10/6/2026',
-    invoice_url: 'https://invoice.stripe.com/i/...',
-    signed_by: 'Jane Doe'
-  }]
+  output: [{}]
 });
 
-export const leadToInvoiceWorkflow = workflow({
-  name: 'Lead-to-Invoice with Legal Agreements',
-  version: 1,
-  description: 'Inbound form → OTP verification → prescreening → signed agreement → Stripe invoice with full legal terms, privacy policy, and fine print',
-  nodes: [
-    intakeForm,
-    serviceConfig,
-    saveLead,
-    sendOtp,
-    callLead,
-    otpPage,
-    checkOtp,
-    isVerified,
-    prescreenPage,
-    scorePrescreen,
-    qualifyCheck,
-    agreementPage,
-    createCustomer,
-    createInvoice,
-    addLineItem,
-    finalizeInvoice,
-    sendInvoice,
-    updateLeadRecord,
-    successPage
-  ],
-  connections: {
-    intakeForm: [{ node: serviceConfig, type: 'main', index: 0 }],
-    serviceConfig: [{ node: saveLead, type: 'main', index: 0 }],
-    saveLead: [
-      { node: sendOtp, type: 'main', index: 0 },
-      { node: callLead, type: 'main', index: 0 }
-    ],
-    sendOtp: [{ node: otpPage, type: 'main', index: 0 }],
-    callLead: [{ node: otpPage, type: 'main', index: 0 }],
-    otpPage: [{ node: checkOtp, type: 'main', index: 0 }],
-    checkOtp: [{ node: isVerified, type: 'main', index: 0 }],
-    isVerified: [{ node: prescreenPage, type: 'main', index: 0 }],
-    prescreenPage: [{ node: scorePrescreen, type: 'main', index: 0 }],
-    scorePrescreen: [{ node: qualifyCheck, type: 'main', index: 0 }],
-    qualifyCheck: [{ node: agreementPage, type: 'main', index: 0 }],
-    agreementPage: [{ node: createCustomer, type: 'main', index: 0 }],
-    createCustomer: [{ node: createInvoice, type: 'main', index: 0 }],
-    createInvoice: [{ node: addLineItem, type: 'main', index: 0 }],
-    addLineItem: [{ node: finalizeInvoice, type: 'main', index: 0 }],
-    finalizeInvoice: [{ node: sendInvoice, type: 'main', index: 0 }],
-    sendInvoice: [
-      { node: updateLeadRecord, type: 'main', index: 0 },
-      { node: successPage, type: 'main', index: 0 }
-    ],
-    updateLeadRecord: [{ node: successPage, type: 'main', index: 0 }]
+const nurturePage = node({
+  type: 'n8n-nodes-base.form',
+  version: 2.5,
+  config: {
+    name: 'Nurture Page',
+    parameters: {
+      operation: 'completion',
+      respondWith: 'text',
+      completionTitle: 'Thanks, we will be in touch',
+      completionMessage: 'Our AI assistant reviewed your answers. We will email you helpful resources and follow up when the timing is right.'
+    }
   },
-  meta: {
-    notes: [
-      {
-        text: '⚖️ LEGAL AGREEMENTS (Production Ready)\n\nWorkflow includes full legal documentation:\n1. SERVICE TERMS: Scope of work, deliverables, timeline\n2. PRIVACY POLICY: Data collection, storage, GDPR/CCPA compliance\n3. FINE PRINT:\n   - Refund policy: Non-refundable after 30 days\n   - Liability limits: Liability capped at service fee\n   - Termination: Either party can terminate with 30 days notice\n   - Dispute resolution: Binding arbitration\n   - Governing law: [Your State]\n4. PAYMENT TERMS: Due date, late fees, payment methods\n5. ELECTRONIC SIGNATURE: Typed name = legal signature under UETA/ESIGN\n\nAll legal text embedded in agreementPage form (collapsible sections)\nCustomer receives email copy before sign-off'
-      },
-      {
-        text: '📧 EMAIL DELIVERY\n\nAgreement sent via SendGrid before signature:\n1. intakeForm → serviceConfig\n2. serviceConfig triggers sendAgreementEmail node\n3. Email includes:\n   - Full service terms (formatted, collapsible)\n   - Privacy policy\n   - Fine print with all disclaimers\n   - Checksum/version tracking\n   - "Accept" button links to agreementPage form\n4. Form tracks email open time + acceptance time\n5. Signature timestamp stored in lead record'
-      },
-      {
-        text: '✍️ ELECTRONIC SIGNATURE & CONSENT\n\nSignature capture:\n- Typed name = e-signature (complies with UETA, ESIGN Act)\n- Timestamp recorded (submittedAt field)\n- IP address captured by form (n8n native)\n- Consent checkbox required + tracked\n- Signature stored in lead record (audit trail)\n- Stripe invoice metadata includes signature_name\n\nCompliance:\n- No invoice without signed agreement\n- No payment without explicit consent\n- Full audit trail maintained'
-      },
-      {
-        text: '🔧 SETUP REQUIRED\n\nCredentials:\n1. Twilio Account SID + Auth Token → Twilio Verify SMS\n2. Twilio Verify Service SID → OTP delivery\n3. Stripe API Key (secret) → Customer + Invoice creation\n4. SendGrid API Key → Email delivery of agreements\n\nConfiguration:\n1. Edit serviceConfig node:\n   - business_name: "Your Business Name"\n   - business_email: "support@yourcompany.com"\n   - twilio_from_number: "+1 555 000 0000"\n   - twilio_verify_sid: "VA..."\n   - service_name: "Service Package Name"\n   - price_usd: 500 (or your price)\n   - days_until_due: 7\n\n2. Edit agreementPage node with FULL legal text (see sticky note above)\n3. Create Leads Pipeline data table (if not exists)\n4. Test with sample phone number (use Twilio test credentials)\n5. Activate workflow\n\nNote: agreementPage form currently has placeholder text. Replace with your actual legal agreements (see LEGAL_AGREEMENTS.md)'
-      }
-    ]
-  }
+  output: [{}]
 });
+
+const markUnverified = node({
+  type: 'n8n-nodes-base.dataTable',
+  version: 1.1,
+  config: {
+    name: 'Mark Code Failed',
+    parameters: {
+      resource: 'row',
+      operation: 'update',
+      dataTableId: leadsTable,
+      matchType: 'allConditions',
+      filters: { conditions: [{ keyName: 'lead_ref', condition: 'eq', keyValue: expr('{{ $("Prepare Lead").item.json.lead_ref }}') }] },
+      columns: {
+        mappingMode: 'defineBelow',
+        value: { status: 'unverified', otp_status: expr("{{ $json.status || 'failed' }}") },
+        schema: [
+          { id: 'status', displayName: 'status', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true },
+          { id: 'otp_status', displayName: 'otp_status', required: false, defaultMatch: false, display: true, type: 'string', canBeUsedToMatch: true }
+        ]
+      },
+      options: {}
+    }
+  },
+  output: [{ id: 1 }]
+});
+
+const codeFailedPage = node({
+  type: 'n8n-nodes-base.form',
+  version: 2.5,
+  config: {
+    name: 'Code Failed Page',
+    parameters: {
+      operation: 'completion',
+      respondWith: 'text',
+      completionTitle: 'We could not verify that code',
+      completionMessage: 'The code was incorrect or expired. Please submit the request form again to get a new code.'
+    }
+  },
+  output: [{}]
+});
+
+const aboutNote = sticky('## 🤖 AI Lead-to-Invoice Assistant\n1. **Intake form** collects the lead with SMS consent\n2. **Twilio Verify** texts a one-time code (SMS only, no calls)\n3. **Prescreen** - three questions, auto-scored\n4. **Agreement page** - collapsible Terms / Privacy / Fine Print, typed-name e-signature\n5. **Stripe** creates and emails the invoice\n\nEvery step is recorded in the **Leads Pipeline** data table.', [], { color: 5 });
+
+const setupNote = sticky('## ⚙️ Setup checklist\n- **Prepare Lead**: set `twilio_verify_sid`, `service_name`, `price_usd`, `days_until_due`\n- **Text Verification Code / Check Verification Code**: select a Twilio credential\n- **Agreement page**: legal text is a DRAFT from LEGAL_AGREEMENTS.md. Have an attorney review it and fill in your business name and state\n- Stripe uses your existing *Stripe account* credential\n- Publish, then open `/form/lead-intake` to test', [], { color: 3 });
+
+export default workflow('lead-to-invoice', 'AI Lead-to-Invoice Assistant')
+  .add(intakeForm)
+  .to(prepareLead)
+  .to(saveLead)
+  .to(sendCode)
+  .to(enterCode)
+  .to(checkCode)
+  .to(codeApproved
+    .onTrue(markVerified.to(prescreenPage).to(scorePrescreen).to(saveScore).to(isQualified
+      .onTrue(agreementPage.to(createCustomer).to(createInvoice).to(addLineItem).to(sendInvoice).to(saveInvoice).to(invoiceSentPage))
+      .onFalse(nurturePage)))
+    .onFalse(markUnverified.to(codeFailedPage)))
+  .add(aboutNote)
+  .add(setupNote)
+  .group('AI intake & phone check', [prepareLead, saveLead, sendCode, enterCode, checkCode], { description: 'Normalizes the phone number, saves the lead, texts a Twilio Verify code and checks the reply' })
+  .group('AI qualification', [markVerified, prescreenPage, scorePrescreen, saveScore], { description: 'Three prescreen questions scored automatically and saved to the Leads Pipeline' })
+  .group('AI agreement & billing', [agreementPage, createCustomer, createInvoice, addLineItem, sendInvoice, saveInvoice, invoiceSentPage], { description: 'Collapsible terms with typed-name e-signature, then Stripe creates and emails the invoice' });
