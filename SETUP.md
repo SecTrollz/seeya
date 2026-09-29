@@ -40,6 +40,36 @@ Every step updates **Leads Pipeline**.
 
 Nobody is contacted automatically.
 
+## Lead scoring and briefs
+
+Both prospecting workflows use the same approach:
+- **AI-rated factors:** the AI rates each factor from 0 to 5 and must quote the evidence (a fact plus its source). If it has no evidence, the factor is capped at 1, so a lead can't score high on guesses.
+- **Calculated factors:** everything else is computed by the workflow, not the AI.
+
+**Legislative Report Generator.** The score runs 0–100. You can edit the weights and thresholds in the **Settings** node.
+
+| Factor | Setting | Default | How it's scored |
+|---|---|---|---|
+| The law fits their actual work | `w_applicability` | 30 | AI, with evidence |
+| Deadline urgency | `w_urgency` | 20 | Computed from the nearest upcoming deadline: ≤90 days = 5, ≤180 = 4, ≤1 year = 3, already past = 1 |
+| Penalty exposure | `w_penalty` | 15 | AI, with evidence |
+| Company size fit | `w_size_fit` | 15 | Computed. Inside `ideal_min_employees`–`ideal_max_employees` (10–500) = 5; within half/double of that range = 3; otherwise 1; unknown = 2 |
+| Contactability | `w_contactability` | 10 | Computed. Verified phone = +3, official website found = +2 |
+| Timing signals (hiring, expansion, contracts, incidents) | `w_trigger_signals` | 10 | AI, with evidence |
+
+- **Tier:** A if the score is at least `tier_a_min` (75); B if at least `tier_b_min` (55); otherwise C.
+- **Confidence:** the share of the six factors backed by real data. A low-confidence lead needs more checking before you call.
+
+**What each brief (Discord post and Legislative Reports row) contains:**
+- The score, tier, confidence and per-factor breakdown.
+- The phone number, used only if it appears next to the business name in the research or on the business's own website.
+- The official website. The workflow finds the company's own site, skipping directories such as Yelp, YellowPages and BBB, and reads it.
+- Location, size, and who to ask for when a decision-maker is named publicly.
+- A plain summary of what the company does.
+- 2–3 sourced talking points, and a call script whose opener uses one of them.
+
+**AI Prospector.** The score runs 0–10. The weights are at the top of the **Compute Weighted Score** node: law fit 45, penalty 20, size 20, signals 15. Trade associations, chambers, non-profits and government bodies score 0.
+
 ## Data tables
 
 | Table | ID | Used by |
@@ -53,7 +83,7 @@ Nobody is contacted automatically.
 Each workflow also has a "Setup checklist" sticky note on its canvas.
 
 **Credentials**
-- **Stripe:** the existing *Stripe account* credential. Open each Stripe HTTP node in Lead-to-Invoice and confirm it is selected.
+- **Stripe:** the existing *Stripe account* credential. Open each Stripe HTTP node in Lead-to-Invoice and confirm it is selected. ⚠️ **This credential is connected to a LIVE Stripe account ("evanShmevan Services").** For testing, create a second Stripe credential with a test key (`sk_test_…`) and switch to it. Invoices sent with the live key are real.
 - **Twilio:** create a Twilio credential and select it in **Text Verification Code** and **Check Verification Code**. Create a Verify Service in the Twilio console and paste its SID (`VA…`) into `twilio_verify_sid` in **Prepare Lead**.
 - **Vibe Prospecting (Explorium):** create a *Custom Auth* credential with `{"headers":{"api_key":"YOUR_KEY"}}`. Select it in **Match Business in Vibe**, **Enrich Firmographics** and **Search Vibe Prospecting**.
 - **Crunchbase:** requires a paid API plan. Create a *Custom Auth* credential with `{"headers":{"X-cb-user-key":"YOUR_KEY"}}` and select it in both **Look Up Crunchbase** nodes.

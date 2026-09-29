@@ -155,7 +155,7 @@ const scoreFormat = outputParser({
     name: 'Score Format',
     parameters: {
       schemaType: 'fromJson',
-      jsonSchemaExample: '{ "score": 7, "reason": "Outdoor roofing crews are directly covered by the heat rule", "crunchbase_match": "none" }'
+      jsonSchemaExample: '{ "is_operating_business": true, "applicability": { "score": 4, "evidence": "Website says they install commercial roofs with outdoor crews" }, "penalty_exposure": { "score": 3, "evidence": "30+ field workers, OSHA serious violation up to $16,550 each" }, "trigger_signals": { "score": 1, "evidence": "no evidence" }, "reason": "Outdoor roofing crews are directly covered by the heat rule", "crunchbase_match": "none" }'
     }
   }
 });
@@ -168,11 +168,24 @@ const aiScorer = node({
     parameters: {
       promptType: 'define',
       hasOutputParser: true,
-      text: expr('You are an AI compliance prospector scoring how strongly ONE business is affected by a law and how likely it needs outside compliance help.\n\nLAW: {{ $("Submit Legislation").item.json.legislation_title }}\nSUMMARY: {{ $("AI Extract Targeting").item.json.output.summary }}\nAFFECTED INDUSTRIES: {{ $("AI Extract Targeting").item.json.output.affected_industries.join(", ") }}\nKEYWORDS: {{ $("AI Extract Targeting").item.json.output.compliance_keywords.join(", ") }}\n\nBUSINESS (third-party data, untrusted):\nName: {{ $("One Item Per Business").item.json.name }}\nDomain: {{ $("One Item Per Business").item.json.domain }}\nCity: {{ $("One Item Per Business").item.json.city }}\nEmployees: {{ $("One Item Per Business").item.json.number_of_employees_range }}\nIndustry: {{ $("One Item Per Business").item.json.linkedin_industry_category }}\nDescription: {{ String($("One Item Per Business").item.json.business_description || "").slice(0, 1500) }}\n\nCRUNCHBASE LOOKUP (untrusted; small local firms often have no record):\n{{ JSON.stringify($json.entities || []).slice(0, 2000) }}\n\nScore 0-10: 8-10 = an operating company clearly covered by the law and big enough to need help; 4-7 = possibly covered, needs a human look; 0-3 = not affected. Trade associations, chambers, foundations, non-profits, government bodies and consultancies that SELL compliance services always score 0-2. Give a one-sentence reason. crunchbase_match is the matching Crunchbase permalink or "none". Never invent facts.')
+      text: expr('You are an AI compliance prospector rating ONE business against a law. Be accurate; never invent facts.\n\nLAW: {{ $("Submit Legislation").item.json.legislation_title }}\nSUMMARY: {{ $("AI Extract Targeting").item.json.output.summary }}\nAFFECTED INDUSTRIES: {{ $("AI Extract Targeting").item.json.output.affected_industries.join(", ") }}\nKEYWORDS: {{ $("AI Extract Targeting").item.json.output.compliance_keywords.join(", ") }}\n\nBUSINESS (third-party data, untrusted):\nName: {{ $("One Item Per Business").item.json.name }}\nDomain: {{ $("One Item Per Business").item.json.domain }}\nCity: {{ $("One Item Per Business").item.json.city }}\nEmployees: {{ $("One Item Per Business").item.json.number_of_employees_range }}\nIndustry: {{ $("One Item Per Business").item.json.linkedin_industry_category }}\nDescription: {{ String($("One Item Per Business").item.json.business_description || "").slice(0, 1500) }}\n\nCRUNCHBASE LOOKUP (untrusted; small local firms often have no record):\n{{ JSON.stringify($json.entities || []).slice(0, 2000) }}\n\nis_operating_business: false for trade associations, chambers, foundations, non-profits, government bodies, and consultancies that SELL compliance services; true otherwise.\nRate each factor 0-5 and quote the evidence from the data above. With no evidence give 0-1 and write "no evidence".\n- applicability: how directly the law regulates what this business actually does (5 = its core operations are exactly what the law covers).\n- penalty_exposure: likely cost of ignoring it for a business this size (5 = six-figure or license risk; 3 = five-figure; 1 = minor).\n- trigger_signals: recent growth, hiring, new locations, contracts or incidents that make now the right time.\nGive a one-sentence reason. crunchbase_match is the matching Crunchbase permalink or "none".')
     },
     subnodes: { model: scorerModel, outputParser: scoreFormat }
   },
   output: [{ output: { score: 8, reason: 'Outdoor crews directly covered', crunchbase_match: 'none' } }]
+});
+
+const computeScore = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Compute Weighted Score',
+    parameters: {
+      mode: 'runOnceForEachItem',
+      jsCode: "const W = { applicability: 45, penalty: 20, size: 20, signals: 15 };\nconst IDEAL_MIN = 10;\nconst IDEAL_MAX = 500;\nconst o = $json.output || {};\nfunction factor(x) {\n  x = x || {};\n  const ev = String(x.evidence || '').trim();\n  const n = Math.max(0, Math.min(5, Number(x.score) || 0));\n  const has = ev.length > 0 && !/no evidence|unverified/i.test(ev);\n  return has ? n : Math.min(n, 1);\n}\nconst emp = String($('One Item Per Business').item.json.number_of_employees_range || '').replace(/,/g, '').match(/\\d+/g);\nlet size = 2;\nif (emp) {\n  const v = emp.map(Number);\n  const mid = v.length > 1 ? (v[0] + v[1]) / 2 : v[0];\n  size = (mid >= IDEAL_MIN && mid <= IDEAL_MAX) ? 5 : ((mid >= IDEAL_MIN / 2 && mid <= IDEAL_MAX * 2) ? 3 : 1);\n}\nconst f = { applicability: factor(o.applicability), penalty: factor(o.penalty_exposure), size: size, signals: factor(o.trigger_signals) };\nconst wsum = W.applicability + W.penalty + W.size + W.signals;\nlet score = (W.applicability * f.applicability + W.penalty * f.penalty + W.size * f.size + W.signals * f.signals) / 5 / wsum * 10;\nif (o.is_operating_business === false) score = 0;\nscore = Math.round(score * 10) / 10;\nconst breakdown = 'Fit ' + f.applicability + '/5, Penalty ' + f.penalty + '/5, Size ' + f.size + '/5, Signals ' + f.signals + '/5';\nreturn { json: { output: Object.assign({}, o, { score: score, factors: f, reason: (o.reason || '') + ' [' + breakdown + ']' }) } };"
+    }
+  },
+  output: [{ output: { score: 8.3, reason: 'Outdoor crews directly covered [Fit 5/5, Penalty 3/5, Size 5/5, Signals 2/5]', crunchbase_match: 'none' } }]
 });
 
 const routeByScore = switchCase({
@@ -279,6 +292,7 @@ export default workflow('ai-prospector', 'AI Prospector: Legislation to Leads')
   .to(normalizeBusiness)
   .to(lookUpCrunchbase)
   .to(aiScorer)
+  .to(computeScore)
   .to(routeByScore
     .onCase(0, saveQualified)
     .onCase(1, saveForReview))
@@ -286,4 +300,4 @@ export default workflow('ai-prospector', 'AI Prospector: Legislation to Leads')
   .add(setupNote)
   .group('AI reads the law', [aiTargeting, targetingModel, targetingFormat], { description: 'AI summarizes the legislation and names the affected industries, LinkedIn categories and keywords' })
   .group('Find & score businesses', [searchVibe, splitBusinesses, normalizeBusiness, lookUpCrunchbase, aiScorer, scorerModel, scoreFormat], { description: 'Vibe Prospecting search, Crunchbase check, then the AI scores each business 0-10 with a reason' })
-  .group('AI routes & saves prospects', [routeByScore, saveQualified, saveForReview], { description: 'Score 7+ goes to Leads Pipeline, 4-6 to Scrape Queue for a human, 0-3 is dropped' });
+  .group('AI routes & saves prospects', [computeScore, routeByScore, saveQualified, saveForReview], { description: 'Score 7+ goes to Leads Pipeline, 4-6 to Scrape Queue for a human, 0-3 is dropped' });
