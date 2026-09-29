@@ -108,3 +108,34 @@ These were chosen without your input and are easy to change:
   - **Lead-to-Invoice:** the lead must answer "Yes" on budget, plus give a 30-day timeline or be the decision-maker.
   - **Prospector:** an AI score of 7 or higher qualifies.
 - **Legal text:** the agreement page and `LEGAL_AGREEMENTS.md` are **drafts written by AI, not by a lawyer**. They include binding arbitration, a class-action waiver, liability capped at the fee paid, and no refunds once work starts. Have an attorney review them and fill in your business name and state before real customers sign.
+
+## Lead Portal (swipe review + dialer)
+
+**n8n workflow `khysPRlqfn2Odp5N` ("AI Lead Portal: Swipe Review + Dialer")** is **unpublished** until you finish setup:
+1. In n8n, create a **Basic Auth** credential named *Portal login* with a username and a strong password. Select it on the 5 webhook triggers.
+2. Publish the workflow.
+
+**Run it locally (single file, Node 18+, nothing to install):**
+```bash
+PORTAL_USER=your-user PORTAL_PASS='your-password' node lead_portal_app.mjs
+```
+Open `http://localhost:8787`. The terminal also prints a Wi-Fi address (e.g. `http://192.168.1.20:8787`). Open that on your phone and tap a number to call with the **phone's own dialer**. The same login protects the local page. Once the workflow is published, the portal also works directly at `https://trasch.app.n8n.cloud/webhook/lead-portal`.
+
+**How it works:**
+- **Review tab:** each card is an AI-researched profile, best score first. It shows the score and tier, contact details, what the company does, the law changes that affect them, how we can help, what happens if they wait, talking points and the call script. Swipe right (or press →) to **ship**, left (←) to **pass**. Profiles you haven't swiped stay in the queue across sessions.
+- **Shipping** a profile schedules call slots at **10 AM and 2 PM ET on weekdays for the next 7 days** (up to 10 calls) in the **Call Slots** table (`l6eg5rMAHifwRx2d`).
+- **Dialer tab:** calls due now, one card per business, highest score first. Each card has a tap-to-call button, talking points, the script and a notes box. It refreshes every minute.
+- **Outcome buttons and stop rules:**
+  - **No answer** and **Left voicemail** keep the calls going.
+  - **Do not call**, **Talked to decision-maker** and **Interested** cancel all remaining slots.
+  - After **3 voicemails**, the Left voicemail button is disabled and the card warns not to leave another.
+  - Slots that passed without a call are marked missed.
+- **Where everything is saved:** swipes, outcomes and notes are stored on the Legislative Reports row (`status`, `call_status`, `calls_made`, `voicemails`, `last_outcome`, `rep_notes`) and in Call Slots.
+- **Tuning:** change the call times in **Schedule Call Slots** (`HOURS`, `DAYS`) and the voicemail limit in **Apply Stop Rules**.
+
+**Known gaps and failure points:**
+- **Test runs used up leads.** My 3 test runs used the "skip already reported" memory, so those ~23 businesses won't come back automatically. They are already in the review queue.
+- **Phone type is unknown.** Numbers aren't checked as mobile vs landline. Calls are dialed by hand from a phone, which avoids autodialer consent rules, but still honor do-not-call requests and call only between 8am and 9pm local time.
+- **Calls are logged by hand.** If a rep forgets to tap an outcome, the slot is marked missed at the next logged outcome.
+- **Discord gets every lead.** All leads, even low scores, still post to Discord; the portal is where you filter.
+- **No failure alerts.** Nothing alerts you if the Monday run fails. Check n8n → Executions, or add an error workflow.
