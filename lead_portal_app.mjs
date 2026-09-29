@@ -1,28 +1,201 @@
 #!/usr/bin/env node
-// AI Lead Portal: single-file local web app. Needs Node 18+, no npm install.
-// Data lives in n8n (Legislative Reports + Call Slots tables) via the "AI Lead Portal" workflow's webhooks.
+// AI Lead Portal: standalone single-file web app. Node 18+, no npm install, no n8n or other service needed.
 //
-//   PORTAL_USER=me PORTAL_PASS='strong-password' node lead_portal_app.mjs
+//   node lead_portal_app.mjs                          (open http://localhost:8787)
+//   PORTAL_PASS='secret' node lead_portal_app.mjs      (optional password, user "admin" or PORTAL_USER)
 //
-// Optional: PORT (default 8787), N8N_WEBHOOK_BASE (default https://trasch.app.n8n.cloud/webhook).
-// The same username/password protects this local page and is sent to n8n's "Portal login" Basic Auth.
+// Data is saved to lead_portal_data.json next to this file (override with DATA_FILE).
+// On first start it loads leads_seed.json if present. Import more with the Import button (JSON array or CSV).
 import http from 'node:http';
 import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8787;
-const N8N_BASE = (process.env.N8N_WEBHOOK_BASE || 'https://trasch.app.n8n.cloud/webhook').replace(/\/+$/, '');
-const USER = process.env.PORTAL_USER || '';
+const DATA_FILE = process.env.DATA_FILE || path.join(DIR, 'lead_portal_data.json');
+const SEED_FILE = path.join(DIR, 'leads_seed.json');
+const USER = process.env.PORTAL_USER || 'admin';
 const PASS = process.env.PORTAL_PASS || '';
-if (!USER || !PASS) {
-  console.error('Set PORTAL_USER and PORTAL_PASS to the username/password of the n8n "Portal login" credential.');
-  process.exit(1);
+const AUTH = PASS ? 'Basic ' + Buffer.from(USER + ':' + PASS).toString('base64') : '';
+
+const TZ = 'America/New_York';
+const CALL_HOURS = [10, 14];
+const CALL_DAYS = 7;
+const VOICEMAIL_LIMIT = 3;
+const STOP = { dnc: 'do_not_call', talked: 'talked_to_decision_maker', interested: 'interested' };
+const OUTCOMES = ['no_answer', 'voicemail', 'talked', 'interested', 'dnc'];
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') q = false;
+      else field += c;
+    } else if (c === '"') q = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = '';
+      if (row.some((v) => v !== '')) rows.push(row);
+      row = [];
+    } else field += c;
+  }
+  row.push(field);
+  if (row.some((v) => v !== '')) rows.push(row);
+  const head = (rows.shift() || []).map((h) => h.trim());
+  return rows.map((r) => Object.fromEntries(head.map((h, i) => [h, r[i] ?? ''])));
 }
-const AUTH = 'Basic ' + Buffer.from(USER + ':' + PASS).toString('base64');
-const ROUTES = {
-  '/api/queue': { method: 'GET', path: 'lead-portal-api/queue' },
-  '/api/dialer': { method: 'GET', path: 'lead-portal-api/dialer' },
-  '/api/swipe': { method: 'POST', path: 'lead-portal-api/swipe' },
-  '/api/outcome': { method: 'POST', path: 'lead-portal-api/outcome' }
+
+function importRows(d, rows) {
+  const have = new Set(d.profiles.map((p) => p.report_ref));
+  let added = 0;
+  for (const r of rows || []) {
+    if (!r || typeof r !== 'object' || !r.business_name) continue;
+    const ref = String(r.report_ref || 'LOCAL-' + Date.now() + '-' + added);
+    if (have.has(ref)) continue;
+    have.add(ref);
+    const p = Object.assign({}, r, { report_ref: ref, status: r.status || 'new' });
+    p.priority_score = Number(p.priority_score) || 0;
+    p.confidence = Number(p.confidence) || 0;
+    d.profiles.push(p);
+    added++;
+  }
+  return added;
+}
+
+function save() {
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(db, null, 1));
+  fs.renameSync(tmp, DATA_FILE);
+}
+
+let db;
+try {
+  db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+} catch {
+  db = { profiles: [], slots: [], nextSlotId: 1 };
+  if (fs.existsSync(SEED_FILE)) console.log('Loaded ' + importRows(db, JSON.parse(fs.readFileSync(SEED_FILE, 'utf8'))) + ' lead profiles from leads_seed.json');
+  save();
+}
+
+const tzParts = (t) => Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' })
+  .formatToParts(new Date(t)).filter((p) => p.type !== 'literal').map((p) => [p.type, Number(p.value)]));
+function zonedToUtc(y, m, d, h) {
+  const guess = Date.UTC(y, m - 1, d, h);
+  const p = tzParts(guess);
+  const offset = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - guess;
+  return guess - offset;
+}
+const slotLabel = (t) => new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(t)) + ' ET';
+
+function scheduleSlots(p) {
+  const now = Date.now();
+  const end = now + CALL_DAYS * 86400000;
+  const t0 = tzParts(now);
+  const times = [];
+  for (let d = 0; d <= CALL_DAYS; d++) {
+    const day = new Date(Date.UTC(t0.year, t0.month - 1, t0.day + d));
+    const dow = day.getUTCDay();
+    if (dow === 0 || dow === 6) continue;
+    for (const h of CALL_HOURS) {
+      const t = zonedToUtc(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), h);
+      if (t > now && t <= end) times.push(t);
+    }
+  }
+  return times.map((t, i) => ({
+    id: db.nextSlotId++, report_ref: p.report_ref, business_name: p.business_name, phone: p.phone || 'UNVERIFIED',
+    website: p.website || '', tier: p.tier || 'C', priority_score: Number(p.priority_score) || 0,
+    talking_points: p.talking_points || '', call_script: p.call_script || '',
+    slot_at: new Date(t).toISOString(), slot_label: slotLabel(t), slot_number: i + 1, total: times.length,
+    status: 'pending', no_voicemail: false
+  }));
+}
+
+function toCard(r) {
+  let rep = {};
+  try { rep = typeof r.report_json === 'string' ? JSON.parse(r.report_json || '{}') : (r.report_json || {}); } catch { rep = {}; }
+  const snap = rep.company_snapshot || {};
+  const offer = rep.customized_service_offer || {};
+  const ww = rep.wait_warning || {};
+  return {
+    report_ref: r.report_ref, business_name: r.business_name, location: r.location, industry: r.industry,
+    phone: r.phone, website: r.website, employee_count: r.employee_count, priority_score: Number(r.priority_score) || 0,
+    tier: r.tier || 'C', confidence: Number(r.confidence) || 0, score_breakdown: r.score_breakdown || '',
+    company_about: r.company_about || snap.what_they_do || '', executive_summary: r.executive_summary || rep.executive_summary || '',
+    decision_maker: snap.decision_maker && !/unverified/i.test(snap.decision_maker) ? snap.decision_maker : '',
+    talking_points: r.talking_points || '', triggering_change: r.triggering_change || '', call_script: r.call_script || '',
+    changes: (rep.applicable_legislative_changes || []).slice(0, 4).map((c) => ({ title: c.title, what_changed: c.what_changed || c.summary || '', deadline: c.deadline || '', penalty_exposure: c.penalty_exposure || '' })),
+    approaches: (offer.what_we_do || []).concat((offer.n8n_solutions || []).map((s) => s.name + ': ' + (s.what_it_does || ''))).slice(0, 6),
+    if_they_wait: (ww.if_they_wait || []).concat(ww.penalties || []).slice(0, 4)
+  };
+}
+
+const api = {
+  'GET /api/queue': () => {
+    const cards = db.profiles.filter((p) => p.status === 'new').map(toCard).sort((a, b) => b.priority_score - a.priority_score);
+    return { count: cards.length, cards };
+  },
+  'POST /api/swipe': (b) => {
+    const p = db.profiles.find((x) => x.report_ref === String(b.report_ref || ''));
+    if (!p) return [404, { error: 'profile not found' }];
+    const now = new Date().toISOString();
+    if (b.decision === 'ship') {
+      db.slots.forEach((s) => { if (s.report_ref === p.report_ref && s.status === 'pending') s.status = 'cancelled'; });
+      Object.assign(p, { status: 'shipped', call_status: 'active', calls_made: 0, voicemails: 0, reviewed_at: now });
+      const slots = scheduleSlots(p);
+      db.slots.push(...slots);
+      save();
+      return { ok: true, decision: 'ship', report_ref: p.report_ref, slots: slots.length };
+    }
+    Object.assign(p, { status: 'rejected', reviewed_at: now });
+    save();
+    return { ok: true, decision: 'reject', report_ref: p.report_ref };
+  },
+  'GET /api/dialer': () => {
+    const now = Date.now();
+    const rows = db.slots.filter((s) => s.status === 'pending');
+    const byRef = {};
+    rows.filter((r) => Date.parse(r.slot_at) <= now).sort((a, b) => Date.parse(b.slot_at) - Date.parse(a.slot_at)).forEach((r) => {
+      if (!byRef[r.report_ref]) byRef[r.report_ref] = Object.assign({}, r, { missed: 0 });
+      else byRef[r.report_ref].missed++;
+    });
+    const due = Object.values(byRef).sort((a, b) => b.priority_score - a.priority_score);
+    const upcoming = rows.filter((r) => Date.parse(r.slot_at) > now).sort((a, b) => Date.parse(a.slot_at) - Date.parse(b.slot_at)).slice(0, 30)
+      .map((r) => ({ report_ref: r.report_ref, business_name: r.business_name, slot_label: r.slot_label, slot_number: r.slot_number }));
+    return { now: new Date(now).toISOString(), due, upcoming };
+  },
+  'POST /api/outcome': (b) => {
+    const slot = db.slots.find((s) => s.id === Number(b.slot_id));
+    if (!slot) return [404, { error: 'slot not found' }];
+    const outcome = OUTCOMES.includes(b.outcome) ? b.outcome : 'no_answer';
+    const notes = String(b.notes || '').slice(0, 1000);
+    const now = Date.now();
+    Object.assign(slot, { status: 'done', outcome, notes, completed_at: new Date(now).toISOString() });
+    db.slots.forEach((s) => { if (s.report_ref === slot.report_ref && s.status === 'pending' && Date.parse(s.slot_at) < now) s.status = 'missed'; });
+    const p = db.profiles.find((x) => x.report_ref === slot.report_ref) || {};
+    p.calls_made = (Number(p.calls_made) || 0) + 1;
+    p.voicemails = (Number(p.voicemails) || 0) + (outcome === 'voicemail' ? 1 : 0);
+    const stop = Object.prototype.hasOwnProperty.call(STOP, outcome);
+    p.call_status = stop ? STOP[outcome] : 'active';
+    p.last_outcome = outcome;
+    p.rep_notes = [p.rep_notes || '', new Date(now).toISOString().slice(0, 10) + ' ' + outcome + (notes ? ': ' + notes : '')].filter(Boolean).join('\n').slice(-4000);
+    const pending = db.slots.filter((s) => s.report_ref === slot.report_ref && s.status === 'pending');
+    if (stop) pending.forEach((s) => { s.status = 'cancelled'; });
+    else if (p.voicemails >= VOICEMAIL_LIMIT) pending.forEach((s) => { s.no_voicemail = true; });
+    save();
+    return { ok: true, stopped: stop, call_status: p.call_status, voicemails: p.voicemails };
+  },
+  'POST /api/import': (b) => {
+    const rows = Array.isArray(b.rows) ? b.rows : (typeof b.csv === 'string' ? parseCsv(b.csv) : []);
+    const added = importRows(db, rows);
+    save();
+    return { ok: true, added, total: db.profiles.length };
+  }
 };
 
 function lanUrls() {
@@ -31,6 +204,11 @@ function lanUrls() {
     for (const a of list || []) if (a.family === 'IPv4' && !a.internal) out.push('http://' + a.address + ':' + PORT);
   }
   return out;
+}
+
+function send(res, status, type, body, extra) {
+  res.writeHead(status, Object.assign({ 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' }, extra || {}));
+  res.end(body);
 }
 
 function readBody(req, limit) {
@@ -43,11 +221,6 @@ function readBody(req, limit) {
   });
 }
 
-function send(res, status, type, body, extra) {
-  res.writeHead(status, Object.assign({ 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' }, extra || {}));
-  res.end(body);
-}
-
 const HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI Lead Portal</title>
@@ -56,7 +229,7 @@ const HTML = `<!doctype html>
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 header{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:14px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
 header h1{font-size:18px;margin:0}.tabs{margin-left:auto;display:flex;gap:6px}
-.tab{background:none;border:1px solid var(--line);color:var(--mut);padding:7px 12px;border-radius:999px;cursor:pointer}.tab.on{color:var(--txt);border-color:var(--acc);background:#1b2447}
+.tab{text-decoration:none;background:none;border:1px solid var(--line);color:var(--mut);padding:7px 12px;border-radius:999px;cursor:pointer}.tab.on{color:var(--txt);border-color:var(--acc);background:#1b2447}
 main{max-width:760px;margin:0 auto;padding:16px}
 .stack{position:relative;min-height:420px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 10px 30px #0006;touch-action:pan-y;user-select:none}
@@ -85,7 +258,7 @@ textarea{width:100%;min-height:54px;background:#0e1428;color:var(--txt);border:1
 .foot{color:var(--mut);font-size:12px;text-align:center;margin:24px 0}
 </style></head><body>
 <header><h1>🤖 AI Lead Portal</h1><span id="counts" class="mut small"></span><span class="mut small" title="Open this address on a phone on the same Wi-Fi to call with the phone dialer">📱 __LAN__</span>
-<nav class="tabs"><button class="tab on" data-t="review">Review</button><button class="tab" data-t="dialer">Dialer</button></nav></header>
+<label class="tab" title="Import leads from a JSON or CSV file">⬆ Import<input id="imp" type="file" accept=".json,.csv" hidden></label><a class="tab" href="api/export" download="lead_portal_export.json">⬇ Export</a><nav class="tabs"><button class="tab on" data-t="review">Review</button><button class="tab" data-t="dialer">Dialer</button></nav></header>
 <main><section id="review"></section><section id="dialer" hidden></section>
 <p class="foot">Profiles are researched and written by AI. Verify phone numbers and facts before calling. Not legal advice.</p></main>
 <div id="toast"></div>
@@ -115,7 +288,7 @@ add(card,list('Talking points',String(c.talking_points||'').split(' | ').filter(
 var det=el('details');add(det,el('summary','','Call script'),el('pre','',c.call_script||''));add(card,det);
 return card;}
 function renderReview(){var s=document.getElementById('review');s.textContent='';
-if(!queue.length){add(s,el('div','empty','🎉 Queue is empty. New AI-researched profiles arrive every Monday 7 AM ET.'));return;}
+if(!queue.length){add(s,el('div','empty','🎉 Queue is empty. Import more leads with ⬆ Import (JSON or CSV).'));return;}
 var st=el('div','stack');var card=renderCard(queue[0]);add(st,card);add(s,st);
 var acts=el('div','acts');var no=el('button','big no','✕');no.title='Pass (←)';var ok=el('button','big ok','✓');ok.title='Ship to dialer (→)';add(acts,no,ok);add(s,acts);
 add(s,el('div','hint',queue.length+' in queue · swipe right to ship, left to pass · arrow keys work too'));
@@ -142,41 +315,37 @@ var lastDialer={due:[],upcoming:[]};function loadDialer(){api('dialer').then(fun
 function counts(){document.getElementById('counts').textContent=queue.length+' to review · '+lastDialer.due.length+' calls due';}
 document.querySelectorAll('.tab').forEach(function(t){t.onclick=function(){document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('on',x===t);});document.getElementById('review').hidden=t.dataset.t!=='review';document.getElementById('dialer').hidden=t.dataset.t!=='dialer';if(t.dataset.t==='dialer')loadDialer();};});
 document.addEventListener('keydown',function(e){if(document.getElementById('review').hidden)return;if(e.key==='ArrowRight')decide('ship');if(e.key==='ArrowLeft')decide('reject');});
+document.getElementById('imp').onchange=function(e){var f=e.target.files[0];if(!f)return;f.text().then(function(t){var body;try{var j=JSON.parse(t);body={rows:Array.isArray(j)?j:(j.profiles||j.cards||j.data||[])};}catch(err){body={csv:t};}return api('import',body);}).then(function(r){toast('Imported '+r.added+' new profile(s)');loadQueue();}).catch(function(err){toast('Import failed: '+err.message);});e.target.value='';};
 loadQueue();loadDialer();setInterval(loadDialer,60000);
 </script></body></html>`;
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname === '/healthz') return send(res, 200, 'text/plain', 'ok');
-  if (req.headers.authorization !== AUTH) {
+  if (AUTH && req.headers.authorization !== AUTH) {
     return send(res, 401, 'text/plain', 'Login required', { 'WWW-Authenticate': 'Basic realm="AI Lead Portal", charset="UTF-8"' });
   }
-  if (url.pathname === '/' && req.method === 'GET') {
+  if (req.method === 'GET' && url.pathname === '/') {
     return send(res, 200, 'text/html; charset=utf-8', HTML.replace('__LAN__', lanUrls()[0] || 'http://localhost:' + PORT));
   }
-  const route = ROUTES[url.pathname];
-  if (!route || route.method !== req.method) return send(res, 404, 'application/json', '{"error":"not found"}');
+  if (req.method === 'GET' && url.pathname === '/api/export') {
+    return send(res, 200, 'application/json', JSON.stringify(db, null, 1), { 'Content-Disposition': 'attachment; filename="lead_portal_export.json"' });
+  }
+  const handler = api[req.method + ' ' + url.pathname];
+  if (!handler) return send(res, 404, 'application/json', '{"error":"not found"}');
   try {
-    const body = route.method === 'POST' ? await readBody(req, 64 * 1024) : undefined;
-    if (body !== undefined) JSON.parse(body);
-    const upstream = await fetch(N8N_BASE + '/' + route.path, {
-      method: route.method,
-      headers: { Authorization: AUTH, 'Content-Type': 'application/json' },
-      body,
-      signal: AbortSignal.timeout(30000)
-    });
-    const text = await upstream.text();
-    if (!upstream.ok) console.error('n8n ' + route.path + ' -> HTTP ' + upstream.status);
-    return send(res, upstream.ok ? 200 : 502, 'application/json', upstream.ok ? text : JSON.stringify({ error: 'n8n returned HTTP ' + upstream.status }));
+    const body = req.method === 'POST' ? JSON.parse((await readBody(req, 5 * 1024 * 1024)) || '{}') : {};
+    const out = handler(body);
+    const [status, payload] = Array.isArray(out) ? out : [200, out];
+    return send(res, status, 'application/json', JSON.stringify(payload));
   } catch (e) {
-    console.error(route.path + ': ' + e.message);
-    return send(res, 502, 'application/json', JSON.stringify({ error: e.message }));
+    return send(res, 400, 'application/json', JSON.stringify({ error: e.message }));
   }
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log('AI Lead Portal running');
-  console.log('  This computer:  http://localhost:' + PORT);
+  console.log('AI Lead Portal running (' + db.profiles.filter((p) => p.status === 'new').length + ' profiles to review)');
+  console.log('  This computer:      http://localhost:' + PORT);
   for (const u of lanUrls()) console.log('  Phone (same Wi-Fi): ' + u + '  -> tap a number to call with the phone dialer');
-  console.log('  Data: ' + N8N_BASE + '/lead-portal-api/*');
+  console.log('  Data file:          ' + DATA_FILE);
+  if (!PASS) console.log('  Tip: set PORTAL_PASS to require a password (anyone on your Wi-Fi can open it otherwise).');
 });

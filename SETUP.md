@@ -111,27 +111,28 @@ These were chosen without your input and are easy to change:
 
 ## Lead Portal (swipe review + dialer)
 
-**n8n workflow `khysPRlqfn2Odp5N` ("AI Lead Portal: Swipe Review + Dialer")** is **unpublished** until you finish setup:
-1. In n8n, create a **Basic Auth** credential named *Portal login* with a username and a strong password. Select it on the 5 webhook triggers.
-2. Publish the workflow.
-
-**Run it locally (single file, Node 18+, nothing to install):**
+**Standalone: no n8n, no accounts and no credentials needed.** It's one file and needs only Node 18+:
 ```bash
-PORTAL_USER=your-user PORTAL_PASS='your-password' node lead_portal_app.mjs
+node lead_portal_app.mjs                       # open http://localhost:8787
+PORTAL_PASS='secret' node lead_portal_app.mjs  # optional password (username: admin)
 ```
-Open `http://localhost:8787`. The terminal also prints a Wi-Fi address (e.g. `http://192.168.1.20:8787`). Open that on your phone and tap a number to call with the **phone's own dialer**. The same login protects the local page. Once the workflow is published, the portal also works directly at `https://trasch.app.n8n.cloud/webhook/lead-portal`.
+- **Storage:** data is saved to `lead_portal_data.json` next to the app (git-ignored).
+- **First start:** it loads the 23 real AI-researched briefs in `leads_seed.json`, from the test runs of the legislative workflow.
+- **More leads:** add them with **⬆ Import**, using a JSON array or a CSV with a header row (`business_name` is required). **⬇ Export** downloads everything.
+- **Calling from your phone:** the terminal prints a Wi-Fi address (e.g. `http://192.168.1.20:8787`). Open it on your phone and tap a number to call with the phone's own dialer.
 
 **How it works:**
-- **Review tab:** each card is an AI-researched profile, best score first. It shows the score and tier, contact details, what the company does, the law changes that affect them, how we can help, what happens if they wait, talking points and the call script. Swipe right (or press →) to **ship**, left (←) to **pass**. Profiles you haven't swiped stay in the queue across sessions.
-- **Shipping** a profile schedules call slots at **10 AM and 2 PM ET on weekdays for the next 7 days** (up to 10 calls) in the **Call Slots** table (`l6eg5rMAHifwRx2d`).
+- **Review tab:** each card is an AI-researched profile, best score first. It shows the score and tier, contact details, what the company does, the law changes that affect them, how we can help, what happens if they wait, talking points and the call script. Swipe right (or press →) to **ship**, left (←) to **pass**. Profiles you haven't swiped stay in the queue across restarts.
+- **Shipping** schedules call slots at **10 AM and 2 PM ET on weekdays for the next 7 days** (up to 10 calls).
 - **Dialer tab:** calls due now, one card per business, highest score first. Each card has a tap-to-call button, talking points, the script and a notes box. It refreshes every minute.
 - **Outcome buttons and stop rules:**
   - **No answer** and **Left voicemail** keep the calls going.
   - **Do not call**, **Talked to decision-maker** and **Interested** cancel all remaining slots.
-  - After **3 voicemails**, the Left voicemail button is disabled and the card warns not to leave another.
+  - After **3 voicemails**, the Left voicemail button is disabled.
   - Slots that passed without a call are marked missed.
-- **Where everything is saved:** swipes, outcomes and notes are stored on the Legislative Reports row (`status`, `call_status`, `calls_made`, `voicemails`, `last_outcome`, `rep_notes`) and in Call Slots.
-- **Tuning:** change the call times in **Schedule Call Slots** (`HOURS`, `DAYS`) and the voicemail limit in **Apply Stop Rules**.
+- **Tuning:** call times, days and the voicemail limit are constants at the top of `lead_portal_app.mjs` (`CALL_HOURS`, `CALL_DAYS`, `VOICEMAIL_LIMIT`).
+
+The n8n workflow "AI Lead Portal" (`khysPRlqfn2Odp5N`) is optional and unpublished. You don't need it.
 
 **Known gaps and failure points:**
 - **Test runs used up leads.** My 3 test runs used the "skip already reported" memory, so those ~23 businesses won't come back automatically. They are already in the review queue.
